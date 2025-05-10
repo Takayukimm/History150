@@ -1,112 +1,126 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SAPIX 重要年代150 暗記カード</title>
-  <link rel="manifest" href="manifest.json" />
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>歴史年号フラッシュカード</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, sans-serif; }
+    body { margin: 0; display: flex; flex-direction: column; min-height: 100vh; background: #f4f4f4; }
+    header { padding: 1rem; background: #222; color: #fff; text-align: center; }
+    main { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 1rem; }
+    .card { background: #fff; border-radius: 1rem; box-shadow: 0 4px 10px rgba(0,0,0,.1); max-width: 600px; width: 100%; padding: 2rem; text-align: center; }
+    .question { font-size: 1.25rem; margin-bottom: 1.5rem; }
+    .answer-year { font-size: 2rem; font-weight: bold; margin-bottom: 1rem; color: #007acc; }
+    .explain { font-size: 1rem; margin-bottom: 1rem; }
+    .mnemonic { font-size: .95rem; color: #555; font-style: italic; margin-bottom: 1rem; }
+    .related { font-size: .9rem; color: #666; }
+    .btn { display: inline-block; padding: .75rem 1.25rem; margin: .5rem; border: none; border-radius: .5rem; font-size: 1rem; cursor: pointer; transition: transform .15s ease; }
+    .btn:hover { transform: translateY(-2px); }
+    .primary { background: #007acc; color: #fff; }
+    .覚えた { background: #2ecc71; color: #fff; }
+    .惜しい { background: #f1c40f; color: #222; }
+    .全然 { background: #e74c3c; color: #fff; }
+    footer { padding: 0.5rem; text-align: center; font-size: .875rem; color: #666; }
+    #stats table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    #stats th, #stats td { padding: .75rem; border-bottom: 1px solid #ddd; }
+    #stats th { background: #fafafa; }
+    canvas { max-width: 100%; height: 280px !important; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="min-h-screen bg-gray-100 flex flex-col items-center p-6 gap-6">
-  <div id="root"></div>
+<body>
+  <header>歴史年号フラッシュカード</header>
+  <main>
+    <div id="card" class="card">
+      <div id="progress"></div>
+      <div id="content">CSV を読み込み中…</div>
+    </div>
+  </main>
+  <footer>CSV (sapix_150.csv) 同階層 · 進捗はブラウザに保存されます</footer>
 
-  <script type="text/javascript">
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./service-worker.js');
+<script>
+  const QUALITY_MAP = { '覚えた': 5, '惜しい': 3, '全然': 1 };
+  const SET_SIZE = 30;
+
+  let cards = [];
+  let deck = [];
+  let sessionStats = { '覚えた':0,'惜しい':0,'全然':0 };
+  let cardIdx = 0;
+  const today = new Date().setHours(0,0,0,0);
+
+  const progressEl = document.getElementById('progress');
+  const contentEl  = document.getElementById('content');
+
+  fetch('sapix_150.csv')
+    .then(r=>{if(!r.ok) throw new Error(r.status+' '+r.statusText);return r.text();})
+    .then(txt=>{
+      const rows = txt.split(/\r?\n/).filter(l=>l.trim());
+      const savedMap = JSON.parse(localStorage.getItem('cardState')||'{}');
+      cards = rows.map(l=>{
+        const [event,year,desc='',memo='',rel=''] = l.split(',');
+        const saved = savedMap[event]||{};
+        return {event:event.trim(),year:year.trim(),desc:desc.trim(),memo:memo.trim(),rel:rel.trim(),
+                reps:saved.reps||0,interval:saved.interval||0,ef:saved.ef||2.5,due:saved.due||today};
       });
-    }
-  </script>
+      startSession();
+    })
+    .catch(e=>contentEl.innerHTML='<p style="color:red">CSV 読み込み失敗: '+e.message+'</p>');
 
-  <script type="text/javascript">
-    const { useState, useCallback, useEffect } = React;
+  function saveState(){
+    const obj={};
+    cards.forEach(c=>{obj[c.event]={reps:c.reps,interval:c.interval,ef:c.ef,due:c.due};});
+    localStorage.setItem('cardState',JSON.stringify(obj));
+  }
 
-    function FlashcardApp() {
-      const [cards, setCards] = useState([]);
-      const [queue, setQueue] = useState([]);
-      const [current, setCurrent] = useState(null);
-      const [showBack, setShowBack] = useState(false);
+  function startSession(){
+    sessionStats={ '覚えた':0,'惜しい':0,'全然':0 };
+    cardIdx=0;
+    const dueCards=cards.filter(c=> new Date(c.due).getTime()<=today);
+    const newCards=cards.filter(c=> c.reps===0 && !dueCards.includes(c));
+    deck=dueCards.concat(newCards).slice(0,SET_SIZE);
+    if(deck.length===0){contentEl.innerHTML='<p>本日のカードはありません🎉</p>';progressEl.textContent='0/0';return;}
+    renderQuestion();
+  }
 
-      const nextCard = useCallback(() => {
-        if (queue.length === 0) {
-          alert("🎉 全問終了! お疲れさまでした");
-          setCurrent(null);
-          return;
-        }
-        const nextIdx = queue[0];
-        setCurrent(nextIdx);
-        setQueue(q => q.slice(1));
-        setShowBack(false);
-      }, [queue]);
+  function renderQuestion(){
+    const card=deck[cardIdx];
+    progressEl.textContent=`${cardIdx+1} / ${deck.length}`;
+    contentEl.innerHTML=`<div class="question">${card.event}</div>
+      <button class="btn primary" onclick="showAnswer()">答えを見る</button>`;
+  }
 
-      const markCard = (isCorrect) => {
-        if (!isCorrect) {
-          setQueue(q => [...q, current]);
-        }
-        nextCard();
-      };
+  function showAnswer(){
+    const c=deck[cardIdx];
+    contentEl.innerHTML=`<div class="question">${c.event}</div>
+      <div class="answer-year">${c.year}</div>
+      ${c.desc?`<div class="explain">${c.desc}</div>`:''}
+      ${c.memo?`<div class="mnemonic">語呂：${c.memo}</div>`:''}
+      ${c.rel?`<div class="related">関連：${c.rel}</div>`:''}
+      <div>${['覚えた','惜しい','全然'].map(l=>\`<button class="btn ${l}" onclick="rateCard('${l}')">${l}</button>\`).join('')}</div>`;
+  }
 
-      const handleFile = (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        Papa.parse(file, {
-          header: true,
-          skipEmptyLines: true,
-          complete: (results) => {
-            const data = results.data.map(row => ({
-              front: row.Front || row.front,
-              back: row.Back || row.back,
-              extra: row.Extra || row.extra,
-            }));
-            setCards(data);
-            const indices = data.map((_, i) => i);
-            setQueue(indices);
-            setCurrent(null);
-          },
-        });
-      };
+  function rateCard(level){
+    const q=QUALITY_MAP[level];
+    const c=deck[cardIdx];
+    sessionStats[level]++;
+    if(q>=3){
+      if(c.reps===0)c.interval=1;else if(c.reps===1)c.interval=6;else c.interval=Math.round(c.interval*c.ef);
+      c.ef=Math.max(1.3,c.ef+(0.1-(5-q)*(0.08+(5-q)*0.02)));c.reps+=1;
+    }else{c.reps=0;c.interval=1;}
+    const next=new Date();next.setDate(next.getDate()+c.interval);c.due=next.getTime();
+    saveState();
+    cardIdx++; if(cardIdx>=deck.length)showSessionStats(); else renderQuestion();
+  }
 
-      // persist progress
-      useEffect(() => {
-        if (cards.length > 0) {
-          localStorage.setItem('sapix_progress', JSON.stringify({ queue, current }));
-        }
-      }, [cards, queue, current]);
-
-      return (
-        React.createElement('div', {className: 'flex flex-col items-center gap-6 w-full'},
-          React.createElement('h1', {className: 'text-3xl font-bold'}, 'SAPIX 重要年代150 暗記カード'),
-
-          cards.length === 0 && React.createElement('label', {className: 'cursor-pointer flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700'},
-            React.createElement('span', null, 'CSV をアップロード'),
-            React.createElement('input', {type: 'file', accept: '.csv,text/csv', className: 'hidden', onChange: handleFile})
-          ),
-
-          cards.length > 0 && current === null && React.createElement('button', {className: 'px-6 py-3 text-lg bg-green-600 text-white rounded-xl shadow', onClick: nextCard}, 'スタート'),
-
-          current !== null && React.createElement('div', {className: 'bg-white rounded-xl shadow w-full max-w-xl p-8 flex flex-col items-center gap-4'},
-            React.createElement('p', {className: 'text-xl font-semibold min-h-[4rem] flex items-center justify-center text-center'}, showBack ? cards[current].back : cards[current].front),
-            showBack && cards[current].extra && React.createElement('p', {className: 'text-sm text-gray-600'}, cards[current].extra),
-            React.createElement('div', {className: 'flex gap-4 mt-4'},
-              !showBack ?
-                React.createElement('button', {className: 'px-4 py-2 bg-gray-200 rounded shadow', onClick: () => setShowBack(true)}, '答えを見る')
-              :
-                React.createElement(React.Fragment, null,
-                  React.createElement('button', {className: 'px-4 py-2 bg-green-600 text-white rounded shadow', onClick: () => markCard(true)}, '覚えた'),
-                  React.createElement('button', {className: 'px-4 py-2 bg-red-600 text-white rounded shadow', onClick: () => markCard(false)}, 'まだ')
-                )
-            ),
-            React.createElement('p', {className: 'text-xs text-gray-500 mt-2'}, `残り ${queue.length} / ${cards.length}`)
-          )
-        )
-      );
-    }
-
-    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(FlashcardApp));
-  </script>
+  function showSessionStats(){
+    progressEl.textContent='結果';
+    const history=JSON.parse(localStorage.getItem('history')||'[]');history.push({date:new Date().toISOString(),...sessionStats});localStorage.setItem('history',JSON.stringify(history));
+    const tbl=`<table><tr><th>評価</th><th>回数</th></tr>${Object.entries(sessionStats).map(([k,v])=>\`<tr><td>${k}</td><td>${v}</td></tr>\`).join('')}</table>`;
+    const chartId='chart_'+Date.now();
+    contentEl.innerHTML=`<div id="stats"><p>${deck.length}問終了</p>${tbl}<canvas id="${chartId}"></canvas><button class="btn primary" onclick="startSession()">続ける</button></div>`;
+    new Chart(document.getElementById(chartId),{type:'bar',data:{labels:['覚えた','惜しい','全然'],datasets:[{data:[sessionStats['覚えた'],sessionStats['惜しい'],sessionStats['全然']],label:'今回'}]},options:{plugins:{legend:{display:false}}}});
+  }
+</script>
 </body>
 </html>
